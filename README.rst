@@ -11,6 +11,11 @@ the serial link.
 The default settings for the link are 115200 BAUD, 8 Data, 1 Stop, No parity.
 
 
+License
+-------
+LGPL - http://www.gnu.org/licenses/lgpl.html
+
+
 Source files
 ------------
 Below source/
