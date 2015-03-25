@@ -41,7 +41,7 @@ entity UART is
         );
     Port (
             -- System Clock
-            CLOCK           :   in      std_logic;
+            CLOCK               :   in      std_logic;
             -- High-Active Asynchronous Reset
             RESET               :   in      std_logic;
             -- The input data: 8 bit - this is the UART sender
@@ -116,11 +116,10 @@ architecture RTL of UART is
     ----------------------------------------------------------------------------
     -- Receiver Signals
     ----------------------------------------------------------------------------
-    type    uart_rx_states is ( rx_wait_start_synchronise  -- Wait and deliver data
-                                , rx_get_start_bit  -- We are reading the start bit
-                                , rx_get_data
-                                , rx_get_stop_bit
-                                );
+    type    uart_rx_states is ( rx_wait_start_synchronise,  -- Wait and deliver data
+                                rx_get_start_bit,  -- We are reading the start bit
+                                rx_get_data,
+                                rx_get_stop_bit);
 
     signal  uart_rx_state       : uart_rx_states := rx_wait_start_synchronise;
     signal  uart_rx_bit         : std_logic := '0';
@@ -156,7 +155,7 @@ begin
     TX                  <= uart_tx_data;
 
     -- The input clock is CLOCK_FREQUENCY
-    -- For example its set to 100Mhz, then needs to be divided down to the
+    -- For example it's set to 100MHz, then needs to be divided down to the
     -- rate dictated by the BAUD_RATE. For example, if 115200 baud is selected
     -- (115200 baud = 115200 bps - 115.2kbps) a tick must be generated once
     -- every 1/115200
@@ -164,7 +163,7 @@ begin
     -- here the 16-times oversampled RX clock again
     -- Use a down-counter to have a simple test for zero
     -- Thats the counter part
-   TX_CLOCK_DIVIDER   : process (CLOCK, RESET)
+    TX_CLOCK_DIVIDER   : process (CLOCK, RESET)
     begin
       if RESET = '1' then
         baud_counter     <= (others => '1');
@@ -178,6 +177,7 @@ begin
               end if;
       end if;
     end process TX_CLOCK_DIVIDER;
+
     -- And thats the baud tick, which is of course only one clock long
     -- So both counters should be Zero
     TX_TICK: baud_tick <= '0' when RESET = '1' else
@@ -187,7 +187,7 @@ begin
     -- Get data from DATA_STREAM_IN and send it one bit at a time
     -- upon each BAUD tick. LSB first.
     -- Wait 1 tick, Send Start Bit (0), Send Data 0-7, Send Stop Bit (1)
-    UART_SEND_DATA :    process(CLOCK, RESET)
+    UART_SEND_DATA: process(CLOCK, RESET)
     begin
       if RESET = '1' then
                 uart_tx_data            <= '1';
@@ -254,7 +254,7 @@ begin
     -- create here from the input clock
     -- Use a down-counter to have a simple test for zero
     -- Thats for the counter and tick creation part
-   RX_CLOCK_DIVIDER   : process (CLOCK, RESET)
+    RX_CLOCK_DIVIDER: process (CLOCK, RESET)
     begin
       if RESET = '1' then
         oversample_baud_counter     <= c_oversample_divider_val;
@@ -277,14 +277,13 @@ begin
                                       '1' when oversample_baud_tick = '1' and uart_rx_sync_clock = baud_counter else
                                       '0';
 
-
     -- Synchronise RXD and Filter to suppress spikes with a 2 bit counter
     -- This is done with the 16-times oversampled clock
     -- Take care, every time the receive clock is resynchronized to the next
     -- start bit we can have somewhat of a jump here. But thats no problem
     -- because the jump (in case it occur) is still synchronous. And we save us
     -- another counter :-)
-    RXD_SYNC_FILTER  :   process(CLOCK, RESET)
+    RXD_SYNC_FILTER: process(CLOCK, RESET)
     begin
       if RESET = '1' then
         uart_rx_filter <= (others => '1');
@@ -307,7 +306,7 @@ begin
       end if;
     end process RXD_SYNC_FILTER;
 
-    UART_RECEIVE_DATA   : process(CLOCK, RESET)
+    UART_RECEIVE_DATA: process(CLOCK, RESET)
     begin
       if RESET = '1' then
         uart_rx_state           <= rx_wait_start_synchronise;
