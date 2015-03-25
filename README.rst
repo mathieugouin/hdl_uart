@@ -1,8 +1,6 @@
 VHDL UART
 =========
 
-Tests.
-
 Description
 -----------
 
