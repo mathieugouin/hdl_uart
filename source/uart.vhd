@@ -1,22 +1,29 @@
---------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
 -- UART
--- Implements a universal asynchronous receiver transmitter with parameterisable
--- BAUD rate. Tested on a Spartan 6 LX9 connected to a Silicon Labs Cp210
--- USB-UART Bridge.
---
--- @author         Peter A Bennett
--- @copyright      (c) 2012 Peter A Bennett
--- @license        LGPL
--- @email          pab850@googlemail.com
--- @contact        www.bytebash.com
---
--- Extended by
--- @author         Robert Lange
--- @copyright      (c) 2013 Robert Lange
--- @license        LGPL
--- @home           https://github.com/sd2k9/
---------------------------------------------------------------------------------
-
+-- Implements a universal asynchronous receiver transmitter
+-------------------------------------------------------------------------------
+-- clock
+--      Input clock, must match frequency value given on clock_frequency
+--      generic input.
+-- reset
+--      Synchronous reset.  
+-- data_stream_in
+--      Input data bus for bytes to transmit.
+-- data_stream_in_stb
+--      Input strobe to qualify the input data bus.
+-- data_stream_in_ack
+--      Output acknowledge to indicate the UART has begun sending the byte
+--      provided on the data_stream_in port.
+-- data_stream_out
+--      Data output port for received bytes.
+-- data_stream_out_stb
+--      Output strobe to qualify the received byte. Will be valid for one clock
+--      cycle only. 
+-- tx
+--      Serial transmit.
+-- rx
+--      Serial receive
+-------------------------------------------------------------------------------
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
@@ -121,32 +128,55 @@ architecture RTL of UART is
                                 rx_get_data,
                                 rx_get_stop_bit);
 
-    signal  uart_rx_state       : uart_rx_states := rx_wait_start_synchronise;
-    signal  uart_rx_bit         : std_logic := '0';
-    signal  uart_rx_data_block  : std_logic_vector(7 downto 0) := (others => '0');
-    signal  uart_rx_filter      : unsigned(1 downto 0)  := (others => '0');
-    signal  uart_rx_count       : uart_rxtx_count_type := c_uart_rxtx_count_reset; -- 8 states, stored in 3 bits
-    signal  uart_rx_data_out_stb: std_ulogic := '0';
-    -- Syncing Clock to Receive Data, compared to baud_counter and creates uart_rx_sample_tick
-    signal  uart_rx_sync_clock  : baud_counter_type := (others => '0');
-
-    ----------------------------------------------------------------------------
-    -- Helper functions
-    ----------------------------------------------------------------------------
-    pure function shift_right_by_one (        -- Shift right by 1, fill with new bit
-      constant shift : in std_logic_vector(7 downto 0);  -- Signal to shift
-      constant fill  : in std_ulogic)                    -- New bit 7
-      return std_logic_vector is
-      variable ret : std_logic_vector(7 downto 0);
-    begin  -- function shift_right_by_one
-      ret(7) := fill;
-      ret(6 downto 0) := shift (7 downto 1);
-      return ret;
-    end function shift_right_by_one;
-
-    ----------------------------------------------------------------------------
-    -- Begin Body
-    ----------------------------------------------------------------------------
+architecture rtl of uart is
+    ---------------------------------------------------------------------------
+    -- Baud generation constants
+    ---------------------------------------------------------------------------
+    constant c_tx_div       : integer := clock_frequency / baud;
+    constant c_rx_div       : integer := clock_frequency / (baud * 16);
+    constant c_tx_div_width : integer 
+        := integer(log2(real(c_tx_div))) + 1;   
+    constant c_rx_div_width : integer 
+        := integer(log2(real(c_rx_div))) + 1;
+    ---------------------------------------------------------------------------
+    -- Baud generation signals
+    ---------------------------------------------------------------------------
+    signal tx_baud_counter : unsigned(c_tx_div_width - 1 downto 0) 
+        := (others => '0');   
+    signal tx_baud_tick : std_logic := '0';
+    signal rx_baud_counter : unsigned(c_rx_div_width - 1 downto 0) 
+        := (others => '0');   
+    signal rx_baud_tick : std_logic := '0';
+    ---------------------------------------------------------------------------
+    -- Transmitter signals
+    ---------------------------------------------------------------------------
+    type uart_tx_states is ( 
+        tx_send_start_bit,
+        tx_send_data,
+        tx_send_stop_bit
+    );             
+    signal uart_tx_state : uart_tx_states := tx_send_start_bit;
+    signal uart_tx_data_vec : std_logic_vector(7 downto 0) := (others => '0');
+    signal uart_tx_data : std_logic := '1';
+    signal uart_tx_count : unsigned(2 downto 0) := (others => '0');
+    signal uart_rx_data_in_ack : std_logic := '0';
+    ---------------------------------------------------------------------------
+    -- Receiver signals
+    ---------------------------------------------------------------------------
+    type uart_rx_states is ( 
+        rx_get_start_bit, 
+        rx_get_data, 
+        rx_get_stop_bit
+    );            
+    signal uart_rx_state : uart_rx_states := rx_get_start_bit;
+    signal uart_rx_bit : std_logic := '1';
+    signal uart_rx_data_vec : std_logic_vector(7 downto 0) := (others => '0');
+    signal uart_rx_data_sr : std_logic_vector(1 downto 0) := (others => '1');
+    signal uart_rx_filter : unsigned(1 downto 0) := (others => '1');
+    signal uart_rx_count : unsigned(2 downto 0) := (others => '0');
+    signal uart_rx_data_out_stb : std_logic := '0';
+    signal uart_rx_bit_spacing : unsigned (3 downto 0) := (others => '0');
+    signal uart_rx_bit_tick : std_logic := '0';
 begin
 
     ----------------------------------------------------------------------------
@@ -165,14 +195,17 @@ begin
     -- Thats the counter part
     TX_CLOCK_DIVIDER   : process (CLOCK, RESET)
     begin
-      if RESET = '1' then
-        baud_counter     <= (others => '1');
-      elsif rising_edge (CLOCK) then
-              if oversample_baud_tick = '1'  then  -- Use as Clock enable
-                if baud_counter = 0 then
-                    baud_counter <= (others => '1');
+        if rising_edge (clock) then
+            if reset = '1' then
+                rx_baud_counter <= (others => '0');
+                rx_baud_tick <= '0';    
+            else
+                if rx_baud_counter = c_rx_div then
+                    rx_baud_counter <= (others => '0');
+                    rx_baud_tick <= '1';
                 else
-                    baud_counter <= baud_counter - 1;
+                    rx_baud_counter <= rx_baud_counter + 1;
+                    rx_baud_tick <= '0';
                 end if;
               end if;
       end if;
@@ -285,18 +318,19 @@ begin
     -- another counter :-)
     RXD_SYNC_FILTER: process(CLOCK, RESET)
     begin
-      if RESET = '1' then
-        uart_rx_filter <= (others => '1');
-        uart_rx_bit    <= '1';
-      elsif rising_edge(CLOCK) then
-                if oversample_baud_tick = '1' then
-                    -- Filter RXD.
-                    if RX = '1' and uart_rx_filter < 3 then
+        if rising_edge(clock) then
+            if reset = '1' then
+                uart_rx_filter <= (others => '1');
+                uart_rx_bit <= '1';
+            else
+                if rx_baud_tick = '1' then
+                    -- filter rxd.
+                    if uart_rx_data_sr(1) = '1' and uart_rx_filter < 3 then
                         uart_rx_filter <= uart_rx_filter + 1;
-                    elsif RX = '0' and uart_rx_filter > 0 then
+                    elsif uart_rx_data_sr(1) = '0' and uart_rx_filter > 0 then
                         uart_rx_filter <= uart_rx_filter - 1;
                     end if;
-                    -- Set the RX bit.
+                    -- set the rx bit.
                     if uart_rx_filter = 3 then
                         uart_rx_bit <= '1';
                     elsif uart_rx_filter = 0 then
@@ -308,110 +342,121 @@ begin
 
     UART_RECEIVE_DATA: process(CLOCK, RESET)
     begin
-      if RESET = '1' then
-        uart_rx_state           <= rx_wait_start_synchronise;
-        uart_rx_data_block      <= (others => '0');
-        uart_rx_count           <= c_uart_rxtx_count_reset;
-        uart_rx_data_out_stb    <= '0';
-        uart_rx_sync_clock      <=  (others => '0');
-      elsif rising_edge(CLOCK) then
+        if rising_edge(clock) then
+            if reset = '1' then
+                uart_rx_state <= rx_get_start_bit;
+                uart_rx_data_vec <= (others => '0');
+                uart_rx_count <= (others => '0');
+                uart_rx_data_out_stb <= '0';
+            else
+                uart_rx_data_out_stb <= '0';
                 case uart_rx_state is
-                    -- Waiting for new data to come
-                    when rx_wait_start_synchronise =>
-                        -- With normal clock: Take care about the ACK from
-                        -- previous received data
-                        if DATA_STREAM_OUT_ACK = '1' then
-                          -- Revoke strobe
-                          uart_rx_data_out_stb    <= '0';
-                          -- No need to reset data block, it's anyway overwritten during recive
-                          -- uart_rx_data_block      <= (others => '0');
-                        end if;
-                        -- Only here we need to look for start with the
-                        -- oversampled clock rate
-                        if oversample_baud_tick = '1' and uart_rx_bit = '0' then
-                            -- We are back in business!
-                            uart_rx_state <= rx_get_start_bit;
-                            -- Resynchronize the receive bit timing with the input signal
-                            -- invert the MSB, because we need to skip half of
-                            -- the start bit.
-                            -- We want to sample in the MIDDLE of the bit, remember?
-                            -- This will be used from now on as sample moment
-                            uart_rx_sync_clock <=
-                                 (not baud_counter(3), baud_counter(2), baud_counter(1), baud_counter(0) );
-                        end if;         -- oversample_baud_tick = '1' and uart_rx_bit = '0'
                     when rx_get_start_bit =>
-                        -- With normal clock: Take care about the ACK from
-                        -- previous received data
-                        if DATA_STREAM_OUT_ACK = '1' then
-                          -- Revoke strobe
-                          uart_rx_data_out_stb    <= '0';
-                          -- No need to reset data block, it's anyway overwritten during recive
-                          -- uart_rx_data_block      <= (others => '0');
-                        end if;
-                        if uart_rx_sample_tick = '1' then
-                          if  uart_rx_bit = '0' then
-                            -- Everything alright, we really got a start bit
-                            -- Please continue with data reception
+                        if rx_baud_tick = '1' and uart_rx_bit = '0' then
                             uart_rx_state <= rx_get_data;
-                            -- This is the last time we can revoke a potentially pending
-                            -- receive strobe
-                            -- Your fault if you didn't fetched the data until here!
-                            uart_rx_data_out_stb    <= '0';
-                            -- But at least warn about this
-                            -- Not for synthesis:
-                            -- pragma translate_off
-                            assert uart_rx_data_out_stb = '0'
-                              report "Receive Data was not fetched by system! Loosing previous data byte!"
-                              severity warning;
-                            -- pragma translate_on
-                          else
-                            -- Oh now! Corrupted Start bit! Now we're in troube
-                            -- Best to abort the game and issue an (simulation)
-                            -- warning
-                            uart_rx_state <= rx_wait_start_synchronise;
-                            -- Not for synthesis:
-                            -- pragma translate_off
-                            report "We got an corrupted start bit! Something is wrong and most likely we will now fail to receive the following data. Trying to reset the receive state machine."
-                              severity error;
-                            -- pragma translate_on
-                          end if;
                         end if;
                     when rx_get_data =>
-                        if uart_rx_sample_tick = '1' then
-                          -- Receive next bit, shift others one bit down
-                          -- We receive lsb first, thus we're filling and shifting from msb direction
-                          uart_rx_data_block <= shift_right_by_one(uart_rx_data_block, uart_rx_bit);
-                          if uart_rx_count = 7 then  -- binary 111
-                            -- We're done, move to next state
-                            uart_rx_state <= rx_get_stop_bit;
-                          else
-                            -- Continue in this state
-                            uart_rx_state <= rx_get_data;
-                          end if;
-                          -- Always increment here, will go to zero if we're out
-                          uart_rx_count   <= uart_rx_count + 1;
+                        if uart_rx_bit_tick = '1' then
+                            uart_rx_data_vec(uart_rx_data_vec'high) 
+                                <= uart_rx_bit;
+                            uart_rx_data_vec(
+                                uart_rx_data_vec'high-1 downto 0
+                            ) <= uart_rx_data_vec(
+                                uart_rx_data_vec'high downto 1
+                            );
+                            if uart_rx_count < 7 then
+                                uart_rx_count   <= uart_rx_count + 1;
+                            else
+                                uart_rx_count <= (others => '0');
+                                uart_rx_state <= rx_get_stop_bit;
+                            end if;
                         end if;
                     when rx_get_stop_bit =>
-                        if uart_rx_sample_tick = '1' then
+                        if uart_rx_bit_tick = '1' then
                             if uart_rx_bit = '1' then
-                                -- Everything alright, we really got the closing stop  bit
-                                -- Set our strobe: Data is ready!
-                                uart_rx_data_out_stb    <= '1';
-                            else
-                              -- Oh now! Corrupted Stop bit! Now we're in troube
-                              -- Best to abort the game and issue an (simulation) warning
-                              -- Not for synthesis:
-                              -- pragma translate_off
-                              report "We got an corrupted stop bit! Something is wrong - throwing away this data byte"
-                                severity error;
-                              -- pragma translate_on
+                                uart_rx_state <= rx_get_start_bit;
+                                uart_rx_data_out_stb <= '1';
                             end if;
-                            -- Anyway, go to wait for next datablock
-                            uart_rx_state <= rx_wait_start_synchronise;
-                        end if;
-                    when others =>      -- This is an illegal state - start over
-                        uart_rx_state   <= rx_wait_start_synchronise;
+                        end if;                            
+                    when others =>
+                        uart_rx_state <= rx_get_start_bit;
                 end case;
-      end if;
-    end process UART_RECEIVE_DATA;
-end RTL;
+            end if;
+        end if;
+    end process uart_receive_data;
+    ---------------------------------------------------------------------------
+    -- TX_CLOCK_DIVIDER
+    -- Generate baud ticks at the required rate based on the input clock
+    -- frequency and baud rate
+    ---------------------------------------------------------------------------
+    tx_clock_divider : process (clock)
+    begin
+        if rising_edge (clock) then
+            if reset = '1' then
+                tx_baud_counter <= (others => '0');
+                tx_baud_tick <= '0';    
+            else
+                if tx_baud_counter = c_tx_div then
+                    tx_baud_counter <= (others => '0');
+                    tx_baud_tick <= '1';
+                else
+                    tx_baud_counter <= tx_baud_counter + 1;
+                    tx_baud_tick <= '0';
+                end if;
+            end if;
+        end if;
+    end process tx_clock_divider;
+    ---------------------------------------------------------------------------
+    -- UART_SEND_DATA 
+    -- Get data from data_stream_in and send it one bit at a time upon each 
+    -- baud tick. Send data lsb first.
+    -- wait 1 tick, send start bit (0), send data 0-7, send stop bit (1)
+    ---------------------------------------------------------------------------
+    uart_send_data : process(clock)
+    begin
+        if rising_edge(clock) then
+            if reset = '1' then
+                uart_tx_data <= '1';
+                uart_tx_data_vec <= (others => '0');
+                uart_tx_count <= (others => '0');
+                uart_tx_state <= tx_send_start_bit;
+                uart_rx_data_in_ack <= '0';
+            else
+                uart_rx_data_in_ack <= '0';
+                case uart_tx_state is
+                    when tx_send_start_bit =>
+                        if tx_baud_tick = '1' and data_stream_in_stb = '1' then
+                            uart_tx_data  <= '0';
+                            uart_tx_state <= tx_send_data;
+                            uart_tx_count <= (others => '0');
+                            uart_rx_data_in_ack <= '1';
+                            uart_tx_data_vec <= data_stream_in;
+                        end if;
+                    when tx_send_data =>
+                        if tx_baud_tick = '1' then
+                            uart_tx_data <= uart_tx_data_vec(0);
+                            uart_tx_data_vec(
+                                uart_tx_data_vec'high-1 downto 0
+                            ) <= uart_tx_data_vec(
+                                uart_tx_data_vec'high downto 1
+                            );
+                            if uart_tx_count < 7 then
+                                uart_tx_count <= uart_tx_count + 1;
+                            else
+                                uart_tx_count <= (others => '0');
+                                uart_tx_state <= tx_send_stop_bit;
+                            end if;
+                        end if;
+                    when tx_send_stop_bit =>
+                        if tx_baud_tick = '1' then
+                            uart_tx_data <= '1';
+                            uart_tx_state <= tx_send_start_bit;
+                        end if;
+                    when others =>
+                        uart_tx_data <= '1';
+                        uart_tx_state <= tx_send_start_bit;
+                end case;
+            end if;
+        end if;
+    end process uart_send_data;    
+end rtl;
